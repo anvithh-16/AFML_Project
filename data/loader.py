@@ -25,6 +25,9 @@ class TokenLoader:
         self.rng = np.random.default_rng(seed)
         for s, p in self.paths.items():
             n = os.path.getsize(p) // 2
+            expected = self.meta["tokens"][s]
+            assert n == expected, (f"{s}.bin has {n:,} tokens but meta.json says {expected:,}; "
+                                   "data prep was interrupted or re-run. Re-run prepare_pretrain.py.")
             assert n > seq_len + 1, f"{s}.bin has only {n} tokens (< seq_len+1)"
 
     def _mm(self, split):

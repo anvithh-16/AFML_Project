@@ -73,10 +73,17 @@ def main():
         counts, docs_seen = m["tokens"], m["docs_seen"]
         # truncate any partial batch written after the last meta save
         for s in paths:
+            have = os.path.getsize(paths[s]) // 2 if os.path.exists(paths[s]) else 0
+            if have < counts[s]:
+                sys.exit(f"{s}.bin has {have:,} tokens but meta.json says {counts[s]:,}. "
+                         "The files were reset; run again WITHOUT --resume to start fresh.")
             with open(paths[s], "r+b") as f:
                 f.truncate(counts[s] * 2)
         print(f"resuming at doc {docs_seen}, train tokens {counts['train']:,}")
     else:
+        # fresh start: drop any old meta so it can never disagree with the .bin files
+        if os.path.exists(meta_path):
+            os.remove(meta_path)
         for p in paths.values():
             open(p, "wb").close()
 
