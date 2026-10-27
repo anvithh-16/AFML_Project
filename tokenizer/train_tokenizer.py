@@ -110,3 +110,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # Exit at once: HF streaming leaves a prefetch thread that can keep the
+    # process alive after the work is saved (would hang a Kaggle commit).
+    sys.stdout.flush(); sys.stderr.flush()
+    os._exit(0)

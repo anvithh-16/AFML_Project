@@ -48,6 +48,10 @@ def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--variant", default="A", choices=["A", "B", "C"])
     ap.add_argument("--data_dir", default=DataConfig().out_dir)
+    ap.add_argument("--synth_dir", default=None,
+                    help="synthetic long-range examples (data/make_synth.py); team default: use them")
+    ap.add_argument("--synth_frac", type=float, default=DataConfig().synth_frac,
+                    help="fraction of training rows that start with a synthetic example")
     ap.add_argument("--out_dir", default="checkpoints/pretrain_A")
     ap.add_argument("--resume", default="auto",
                     help="'auto' = out_dir/latest.pt if present, 'none', or a path to latest.pt")
@@ -133,8 +137,10 @@ def main():
     if use_amp:
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    loader = TokenLoader(args.data_dir, args.seq_len, args.batch_size, device=device, seed=args.seed)
+    loader = TokenLoader(args.data_dir, args.seq_len, args.batch_size, device=device, seed=args.seed,
+                         synth_dir=args.synth_dir, synth_frac=args.synth_frac if args.synth_dir else 0.0)
     meta = loader.meta
+    synth_sha = loader.synth_meta["synth_sha"] if loader.synth_meta else None
     cfg = model_config(args, meta["vocab_size"])
     tokens_per_step = args.batch_size * args.grad_accum * args.seq_len
     if args.max_steps is None:
@@ -158,6 +164,8 @@ def main():
         ck = torch.load(resume_path, map_location=device, weights_only=False)
         assert ck["tokenizer_sha"] == meta["tokenizer_sha"], "checkpoint was trained on different data"
         assert ck["model_config"] == asdict(cfg), "model config changed since this checkpoint"
+        assert ck.get("synth_sha") == synth_sha and ck.get("synth_frac", 0.0) == loader.synth_frac, \
+            "synthetic mix differs from this checkpoint's run (check --synth_dir / --synth_frac)"
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["optimizer"])
         scaler.load_state_dict(ck["scaler"])
@@ -176,6 +184,7 @@ def main():
             "model": model.state_dict(), "optimizer": opt.state_dict(), "scaler": scaler.state_dict(),
             "step": step, "best_val": best_val, "model_config": asdict(cfg), "args": vars(args),
             "tokenizer_sha": meta["tokenizer_sha"], "data_tokens": meta["tokens"],
+            "synth_sha": synth_sha, "synth_frac": loader.synth_frac,
             "loader_rng": loader.rng.bit_generator.state, "torch_rng": torch.get_rng_state(),
             "cuda_rng": torch.cuda.get_rng_state() if use_amp else None, "log": log_rows,
         }, os.path.join(args.out_dir, f"{tag}.pt"))
@@ -186,7 +195,8 @@ def main():
                 w.writerows(log_rows)
 
     print(f"variant {args.variant} | {model.num_params() / 1e6:.2f}M params | device {device} | "
-          f"{tokens_per_step:,} tok/step | {args.max_steps:,} steps | data sha {meta['tokenizer_sha']}")
+          f"{tokens_per_step:,} tok/step | {args.max_steps:,} steps | data sha {meta['tokenizer_sha']} | "
+          + (f"synth {loader.synth_frac:.0%} of rows (sha {synth_sha})" if synth_sha else "synth OFF"))
 
     # ---- train ------------------------------------------------------------
     t_start = t_last = time.time()
@@ -252,7 +262,8 @@ def main():
     final = os.path.join(args.out_dir, f"variant-{args.variant}_pretrain_{datetime.date.today():%Y%m%d}.pt")
     save_atomic({"model": model.state_dict(), "model_config": asdict(cfg), "variant": args.variant,
                  "stage": "pretrain", "step": step, "best_val": best_val,
-                 "tokenizer_sha": meta["tokenizer_sha"]}, final)
+                 "tokenizer_sha": meta["tokenizer_sha"], "synth_sha": synth_sha,
+                 "synth_frac": loader.synth_frac}, final)
     with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
         json.dump({"variant": args.variant, "steps": step, "tokens": step * tokens_per_step,
                    "final_val_loss": log_rows[-1]["val_loss"] if log_rows else None,

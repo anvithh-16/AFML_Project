@@ -94,8 +94,40 @@ class MemoryModule(nn.Module):
   different `tokenizer_sha`, you are on the wrong data.
 - Optimiser: AdamW (0.9, 0.95), wd 0.1, lr 6e-4 → 6e-5 cosine, 500 warmup,
   clip 1.0, fp16 + GradScaler, 131k tokens/step (32 × 4 accum × 1024), seed 1337.
-- Instruction tuning: Dolly-15k with the template in `config.py`, loss only on
-  response tokens.
+- Instruction tuning (`train/instruct.py`): Dolly-15k with the template in
+  `config.py`, formatted only through `data/instruct_format.py` (eval uses the
+  same module). Fixed split: 500 val examples, seed 1337; examples over 1,024
+  tokens dropped, never truncated. Loss only on response tokens + `<|endoftext|>`.
+  AdamW lr 2e-4 → 2e-5 cosine, 50 warmup, wd 0.01, batch 16 × 2 accum, 3 epochs,
+  best checkpoint by val loss. Identical for A, B and C.
+
+## 4b. Synthetic long-range data in pretraining (decided Oct 27: yes)
+
+- `data/make_synth.py` builds 60,000 examples once; Kaggle dataset
+  `AFML_Project_Synth`. Each: a key→value FACT, then 256–900 tokens of real
+  FineWeb filler (50% contain 1–3 distractor facts, 25% a later CORRECTION
+  of the same key), then a QUESTION and the ANSWER.
+- `--synth_frac 0.05`: each training row starts with a synthetic example with
+  probability 5%; FineWeb fills the rest of the row. Identical for A, B, C.
+  Val loss is never mixed (pure FineWeb), so it stays comparable.
+- Checkpoints record `synth_sha`; resuming with a different mix is refused.
+- Training distances stop at ~900 tokens (one 1,024-token sequence), so
+  eval distances of 1,000–4,096 also test generalisation beyond training.
+
+**Person C: eval must NOT reuse these training templates** (full lists in
+`synth_meta.json` → `training_templates`):
+
+| Part | Training uses (avoid in eval) |
+|---|---|
+| Keys | locker, storage unit, server rack, safe, vault, mailbox, bike lock, garage, filing cabinet, warehouse door, staff room, lab freezer + a number 1–999 |
+| Values | 4–6 digit codes; words amber, falcon, cedar, orbit, maple, harbor, pixel, quartz, tundra, violet, willow, zephyr, basalt, comet, delta, ember, glacier, indigo |
+| Fact phrasing | "Remember this: the combination for X is V." · "For the record, X uses the code V." · "Memo: X -> V." · "Note to self: X opens with V." |
+| Correction phrasing | "Correction: X now uses V." · "Update: the code for X was changed to V." |
+| Question phrasing | "Q: What is the combination for X?\nA:" · "Which code does X use? Answer:" · "Recall the value for X:" |
+
+Suggested eval instead: people/cities/project names as keys, other value
+types (dates, names, 3-digit or 7+ digit numbers), different sentence shapes.
+Eval prompts for instruction-tuned models use `data/instruct_format.py`.
 
 ## 5. Compute estimate
 
