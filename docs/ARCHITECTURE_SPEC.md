@@ -28,9 +28,14 @@ interface Person B plugs memory into. Anything here changes only at a check-in.
 
 Consequences everyone must be able to explain:
 
-- **Variant A cannot see beyond 256 tokens back.** Any fact further away is
-  invisible to it. This is the gap memory is meant to close, and why tests use
-  contexts of 1k–4k with the needle placed > 256 tokens before the question.
+- **Receptive field (corrected Oct 27, verified in `tests/test_model.py`).**
+  One layer sees 256 tokens back, but stacked windows let information hop back
+  one window per layer: the backbone's indirect reach is
+  L·(W−1) = 8·255 = **2,040 tokens**. Each hop is lossy, so recall from 300–2,040
+  tokens back is possible but weak; **beyond 2,040 tokens Variant A is strictly
+  blind** and only memory can help. Eval should place needles in both regimes
+  (≈300–2,000 tokens back and > 2,040 tokens back, up to 4,096) and report them
+  separately.
 - A 1024-token training sequence = 4 chunks, so memory is exercised during
   pretraining (3 write→read hand-offs per sequence). At eval, 4096 = 16 chunks.
 - RoPE never sees offsets > 256, so evaluating at 4096 does not stress
@@ -41,17 +46,22 @@ Consequences everyone must be able to explain:
 Memory sits **after block 4 of 8** (`memory.insert_after_layer = 4`): lower
 blocks build token features, upper blocks use what memory returns.
 
-Processing is chunk-sequential. For chunk `t` (shape `B × C × d`):
+Implemented in `model/transformer.py` (`SLM.run_memory`). The lower and upper
+blocks run over the whole sequence in parallel, so their attention windows
+cross chunk borders; only the memory step runs chunk by chunk (`B × C × d`):
 
 ```
-h_t   = blocks[0:4](x_t)                       # local attention only
-r_t   = memory.read(h_t, state_{t-1})          # retrieve using chunk-t queries
-h_t   = h_t + r_t                              # residual add (B: always; C: gated inside read)
-state_t = memory.write(h_t, state_{t-1})       # update AFTER reading (no leakage of chunk t into its own read)
-y_t   = blocks[4:8](h_t)
+h = blocks[0:4](x)                             # whole sequence, sliding-window attention
+for each chunk t:
+    r_t     = memory.read(h_t, state_{t-1})    # retrieve using chunk-t queries
+    h_t     = h_t + r_t                        # residual add (B: always; C: gated inside read)
+    state_t = memory.write(h_t, state_{t-1})   # update AFTER reading (no leakage of chunk t into its own read)
+y = blocks[4:8](concat(h_t))                   # whole sequence again
 ```
 
-Interface the backbone will call (Person B implements, keeps this signature):
+Interface the backbone calls (`model/memory.py`; Person B subclasses
+`MemoryModule`, registers B and C in `build_memory`, and adds the class to
+`MEMORIES_TO_CHECK` in `tests/test_model.py`, which checks causality):
 
 ```python
 class MemoryModule(nn.Module):
