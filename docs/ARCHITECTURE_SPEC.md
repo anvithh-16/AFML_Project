@@ -78,6 +78,10 @@ class MemoryModule(nn.Module):
 - Tokenizer: `artifacts/tokenizer/tokenizer.json` (special ids:
   0 `<|endoftext|>`, 1 `<|pad|>`, 2 `<|user|>`, 3 `<|assistant|>`, 4 `<|context|>`).
 - Data: FineWeb-Edu `sample-10BT`, first ~600M train tokens, every 200th doc to val.
+  **Built Oct 27 — Kaggle dataset `AFML_Project_Data`:** 600,734,248 train /
+  3,103,788 val tokens from 481,280 docs; `tokenizer_sha 7f469545b846`.
+  Everyone loads this dataset; nobody re-tokenizes. If your `meta.json` shows a
+  different `tokenizer_sha`, you are on the wrong data.
 - Optimiser: AdamW (0.9, 0.95), wd 0.1, lr 6e-4 → 6e-5 cosine, 500 warmup,
   clip 1.0, fp16 + GradScaler, 131k tokens/step (32 × 4 accum × 1024), seed 1337.
 - Instruction tuning: Dolly-15k with the template in `config.py`, loss only on
