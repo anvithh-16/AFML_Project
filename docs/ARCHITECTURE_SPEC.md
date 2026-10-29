@@ -28,9 +28,14 @@ interface Person B plugs memory into. Anything here changes only at a check-in.
 
 Consequences everyone must be able to explain:
 
-- **Variant A cannot see beyond 256 tokens back.** Any fact further away is
-  invisible to it. This is the gap memory is meant to close, and why tests use
-  contexts of 1k–4k with the needle placed > 256 tokens before the question.
+- **Receptive field (corrected Oct 27, verified in `tests/test_model.py`).**
+  One layer sees 256 tokens back, but stacked windows let information hop back
+  one window per layer: the backbone's indirect reach is
+  L·(W−1) = 8·255 = **2,040 tokens**. Each hop is lossy, so recall from 300–2,040
+  tokens back is possible but weak; **beyond 2,040 tokens Variant A is strictly
+  blind** and only memory can help. Eval should place needles in both regimes
+  (≈300–2,000 tokens back and > 2,040 tokens back, up to 4,096) and report them
+  separately.
 - A 1024-token training sequence = 4 chunks, so memory is exercised during
   pretraining (3 write→read hand-offs per sequence). At eval, 4096 = 16 chunks.
 - RoPE never sees offsets > 256, so evaluating at 4096 does not stress
@@ -41,17 +46,27 @@ Consequences everyone must be able to explain:
 Memory sits **after block 4 of 8** (`memory.insert_after_layer = 4`): lower
 blocks build token features, upper blocks use what memory returns.
 
-Processing is chunk-sequential. For chunk `t` (shape `B × C × d`):
+Implemented in `model/transformer.py` (`SLM.run_memory`). The lower and upper
+blocks run over the whole sequence in parallel, so their attention windows
+cross chunk borders; only the memory step runs chunk by chunk (`B × C × d`):
 
 ```
-h_t   = blocks[0:4](x_t)                       # local attention only
-r_t   = memory.read(h_t, state_{t-1})          # retrieve using chunk-t queries
-h_t   = h_t + r_t                              # residual add (B: always; C: gated inside read)
-state_t = memory.write(h_t, state_{t-1})       # update AFTER reading (no leakage of chunk t into its own read)
-y_t   = blocks[4:8](h_t)
+h = blocks[0:4](x)                             # whole sequence, sliding-window attention
+for each chunk t:
+    r_t     = memory.read(h_t, state_{t-1})    # retrieve using chunk-t queries
+    state_t = memory.write(h_t, state_{t-1})   # AFTER reading; writes the chunk's own pre-read h
+    out_t   = h_t + r_t                        # residual add (B: always; C: gated inside read)
+y = blocks[4:8](concat(out_t))                 # whole sequence again
 ```
 
-Interface the backbone will call (Person B implements, keeps this signature):
+Write input is the pre-read `h_t`, not `h_t + r_t` (decided Oct 29, Person B's
+MEMORY_SPEC §9 Q1): writing `h_t + r_t` would store retrieved content back into
+memory, a feedback loop that can re-store stale values. Variant A is unaffected
+(no memory), so its checkpoints stay valid.
+
+Interface the backbone calls (`model/memory.py`; Person B subclasses
+`MemoryModule`, registers B and C in `build_memory`, and adds the class to
+`MEMORIES_TO_CHECK` in `tests/test_model.py`, which checks causality):
 
 ```python
 class MemoryModule(nn.Module):
@@ -78,10 +93,46 @@ class MemoryModule(nn.Module):
 - Tokenizer: `artifacts/tokenizer/tokenizer.json` (special ids:
   0 `<|endoftext|>`, 1 `<|pad|>`, 2 `<|user|>`, 3 `<|assistant|>`, 4 `<|context|>`).
 - Data: FineWeb-Edu `sample-10BT`, first ~600M train tokens, every 200th doc to val.
+  **Built Oct 27 — Kaggle dataset `AFML_Project_Data`:** 600,734,248 train /
+  3,103,788 val tokens from 481,280 docs; `tokenizer_sha 7f469545b846`.
+  Everyone loads this dataset; nobody re-tokenizes. If your `meta.json` shows a
+  different `tokenizer_sha`, you are on the wrong data.
 - Optimiser: AdamW (0.9, 0.95), wd 0.1, lr 6e-4 → 6e-5 cosine, 500 warmup,
   clip 1.0, fp16 + GradScaler, 131k tokens/step (32 × 4 accum × 1024), seed 1337.
-- Instruction tuning: Dolly-15k with the template in `config.py`, loss only on
-  response tokens.
+- Instruction tuning (`train/instruct.py`): Dolly-15k with the template in
+  `config.py`, formatted only through `data/instruct_format.py` (eval uses the
+  same module). Fixed split: 500 val examples, seed 1337; examples over 1,024
+  tokens dropped, never truncated. Loss only on response tokens + `<|endoftext|>`.
+  AdamW lr 2e-4 → 2e-5 cosine, 50 warmup, wd 0.01, batch 16 × 2 accum, 3 epochs,
+  best checkpoint by val loss. Identical for A, B and C.
+
+## 4b. Synthetic long-range data in pretraining (decided Oct 27: yes)
+
+- `data/make_synth.py` builds 60,000 examples once; Kaggle dataset
+  `AFML_Project_Synth`. Each: a key→value FACT, then 256–900 tokens of real
+  FineWeb filler (50% contain 1–3 distractor facts, 25% a later CORRECTION
+  of the same key), then a QUESTION and the ANSWER.
+- `--synth_frac 0.05`: each training row starts with a synthetic example with
+  probability 5%; FineWeb fills the rest of the row. Identical for A, B, C.
+  Val loss is never mixed (pure FineWeb), so it stays comparable.
+- Checkpoints record `synth_sha`; resuming with a different mix is refused.
+- Training distances stop at ~900 tokens (one 1,024-token sequence), so
+  eval distances of 1,000–4,096 also test generalisation beyond training.
+
+**Person C: eval must NOT reuse these training templates** (full lists in
+`synth_meta.json` → `training_templates`):
+
+| Part | Training uses (avoid in eval) |
+|---|---|
+| Keys | locker, storage unit, server rack, safe, vault, mailbox, bike lock, garage, filing cabinet, warehouse door, staff room, lab freezer + a number 1–999 |
+| Values | 4–6 digit codes; words amber, falcon, cedar, orbit, maple, harbor, pixel, quartz, tundra, violet, willow, zephyr, basalt, comet, delta, ember, glacier, indigo |
+| Fact phrasing | "Remember this: the combination for X is V." · "For the record, X uses the code V." · "Memo: X -> V." · "Note to self: X opens with V." |
+| Correction phrasing | "Correction: X now uses V." · "Update: the code for X was changed to V." |
+| Question phrasing | "Q: What is the combination for X?\nA:" · "Which code does X use? Answer:" · "Recall the value for X:" |
+
+Suggested eval instead: people/cities/project names as keys, other value
+types (dates, names, 3-digit or 7+ digit numbers), different sentence shapes.
+Eval prompts for instruction-tuned models use `data/instruct_format.py`.
 
 ## 5. Compute estimate
 

@@ -45,6 +45,8 @@ class DataConfig:
     val_every_n_docs: int = 200        # every 200th doc -> val (~0.5%)
     out_dir: str = "artifacts/data"
     dtype: str = "uint16"              # vocab < 65536
+    synth_frac: float = 0.05           # team decision Oct 27: 5% of training rows start with a
+                                       # synthetic long-range example (data/make_synth.py), all variants
 
 
 @dataclass
