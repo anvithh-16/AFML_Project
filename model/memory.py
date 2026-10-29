@@ -7,8 +7,12 @@ next block, one chunk of `chunk_size` tokens at a time, in order:
     state = memory.init_state(B, device, dtype)
     for each chunk t:
         r     = memory.read(h_t, state)      # uses only chunks < t  (causal)
-        h_t   = h_t + r                      # residual add
-        state = memory.write(h_t, state)     # store chunk t for later chunks
+        state = memory.write(h_t, state)     # store chunk t's OWN features (pre-read h)
+        out_t = h_t + r                      # residual add; goes on to the upper blocks
+
+Writing from pre-read h (team decision Oct 29, MEMORY_SPEC §9 Q1) keeps retrieved
+content from being written back into memory, a feedback loop that could
+re-store stale values and blur the contradiction test.
 
 Rules a memory module must keep (tests/test_model.py checks them on any module):
   * read() must not depend on chunk t itself, only on `state`.

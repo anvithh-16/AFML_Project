@@ -54,10 +54,15 @@ cross chunk borders; only the memory step runs chunk by chunk (`B × C × d`):
 h = blocks[0:4](x)                             # whole sequence, sliding-window attention
 for each chunk t:
     r_t     = memory.read(h_t, state_{t-1})    # retrieve using chunk-t queries
-    h_t     = h_t + r_t                        # residual add (B: always; C: gated inside read)
-    state_t = memory.write(h_t, state_{t-1})   # update AFTER reading (no leakage of chunk t into its own read)
-y = blocks[4:8](concat(h_t))                   # whole sequence again
+    state_t = memory.write(h_t, state_{t-1})   # AFTER reading; writes the chunk's own pre-read h
+    out_t   = h_t + r_t                        # residual add (B: always; C: gated inside read)
+y = blocks[4:8](concat(out_t))                 # whole sequence again
 ```
+
+Write input is the pre-read `h_t`, not `h_t + r_t` (decided Oct 29, Person B's
+MEMORY_SPEC §9 Q1): writing `h_t + r_t` would store retrieved content back into
+memory, a feedback loop that can re-store stale values. Variant A is unaffected
+(no memory), so its checkpoints stay valid.
 
 Interface the backbone calls (`model/memory.py`; Person B subclasses
 `MemoryModule`, registers B and C in `build_memory`, and adds the class to

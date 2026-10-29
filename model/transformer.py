@@ -169,9 +169,9 @@ class SLM(nn.Module):
         outs = []
         for s in range(0, T, C):
             h_t = h[:, s:s + C]
-            h_t = h_t + self.memory.read(h_t, state)
-            state = self.memory.write(h_t, state)
-            outs.append(h_t)
+            r_t = self.memory.read(h_t, state)        # uses only chunks < t
+            state = self.memory.write(h_t, state)     # stores the chunk's OWN features (pre-read h),
+            outs.append(h_t + r_t)                    # so retrieved content is never written back
         return torch.cat(outs, dim=1), state
 
     def forward(self, idx, targets=None, memory_state=None, return_state=False):

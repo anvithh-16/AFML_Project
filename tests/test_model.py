@@ -136,6 +136,34 @@ def test_memory_causality(mem_cls=ToyMemory):
           f"(backbone alone: {src + 6})")
 
 
+class LoudReadMemory(ToyMemory):
+    """Read returns a huge constant; write records what it was given."""
+
+    def read(self, h, state):
+        return torch.full_like(h, 1000.0)
+
+    def write(self, h, state):
+        self.written = getattr(self, "written", []) + [h.detach().clone()]
+        return state
+
+
+def test_write_sees_pre_read_h():
+    torch.manual_seed(0)
+    cfg = tiny_cfg(chunk_size=4)
+    model = with_memory(cfg, LoudReadMemory)
+    x = torch.randint(0, 64, (1, 8))
+    with torch.no_grad():
+        model(x)
+        T = x.shape[1]
+        cos, sin = model._rope(T)
+        h = model.tok_emb(x)
+        for blk in model.lower:
+            h = blk(h, cos, sin, sliding_window_mask(T, cfg.attn_window, "cpu"))
+    written = torch.cat(model.memory.written, dim=1)
+    assert torch.allclose(written, h, atol=1e-5), "write() was given h + read, expected pre-read h"
+    print("ok  write() receives the chunk's pre-read features (retrieved content not written back)")
+
+
 def test_state_carries_across_calls():
     cfg = tiny_cfg()
     model = with_memory(cfg, ToyMemory)
@@ -161,5 +189,6 @@ if __name__ == "__main__":
     test_memory_hook_order()
     for m in MEMORIES_TO_CHECK:
         test_memory_causality(m)
+    test_write_sees_pre_read_h()
     test_state_carries_across_calls()
     print("\nall backbone tests passed")
