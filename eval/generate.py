@@ -7,6 +7,12 @@ Build the frozen long-context eval set (Person C). See docs/EVAL_SPEC.md.
 
 Writes t1..t5 .jsonl (one example per line) + eval_meta.json.
 
+Control set (added Oct 31): t1c = T1 needles only 60/120/200 tokens back,
+INSIDE the 256-token attention window. Every variant should score high here;
+if one doesn't, the problem is the model or the setup, not missing memory.
+Build it alone (keeps t1..t5 untouched, merges into eval_meta.json):
+    python eval/generate.py --tests t1c
+
 How one example is built (all tests share this):
 
     [lead filler] FACT [filler ... other facts ... filler] \n\nQuestion: ...
@@ -38,6 +44,9 @@ INSTRUCTION = "Read the document and answer the question at the end."
 WEAK_BINS = [300, 600, 1000, 1500, 2000]      # A can partly reach (< 2,040)
 BLIND_BINS = [2500, 3000, 3500, 3900]         # only memory can reach
 BINS = WEAK_BINS + BLIND_BINS
+CONTROL_BINS = [60, 120, 200]                 # inside the 256 window: sanity check (t1c)
+# fixed seed offset per test, so building one test never changes another
+TEST_SEED = {"t1": 0, "t2": 1, "t3": 2, "t4": 3, "t5": 4, "t1c": 5}
 MAX_TOKENS = 4096
 TOLERANCE = 0.03                              # actual distance within 3% of the bin
 
@@ -207,7 +216,8 @@ class Builder:
             return None
         context, distance, n_total = assembled[:3]
         return {"id": f"{test}_{bin_}_{idx:04d}", "test": test, "bin": bin_,
-                "regime": "weak" if bin_ in WEAK_BINS else "blind",
+                "regime": ("control" if bin_ in CONTROL_BINS
+                           else "weak" if bin_ in WEAK_BINS else "blind"),
                 "instruction": INSTRUCTION, "context": context, "answer": answer,
                 "choices": choices,
                 "meta": {"distance": distance, "n_tokens": n_total, **meta}}
@@ -238,7 +248,8 @@ class Builder:
         fact = fill(str(self.rng.choice(rel["fact"])), k, v)
         segs = [self.lead(), fact, f"@FILL:{d - self.question_tokens(q)}"]
         a = self.assemble(segs, 1, q, v, d)
-        return a and self.row("t1", idx, d, a, v, self.choices(v, [], rel["val"]), relation=name)
+        test = "t1c" if d in CONTROL_BINS else "t1"
+        return a and self.row(test, idx, d, a, v, self.choices(v, [], rel["val"]), relation=name)
 
     # ------------------------------------------------------------------ T2
     def t2(self, idx, d, variant=0):
@@ -399,13 +410,19 @@ def main():
     tok = Tokenizer.from_file(args.tokenizer)
     val = np.memmap(args.val_bin, dtype=np.uint16, mode="r")
     os.makedirs(args.out_dir, exist_ok=True)
+    meta_path = os.path.join(args.out_dir, "eval_meta.json")
+    old = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
+    if old and old.get("tokenizer_sha") != sha:
+        sys.exit("existing eval_meta.json was built with another tokenizer; use a new --out_dir")
     meta = {"tokenizer_sha": sha, "seed": args.seed, "bins": BINS, "weak_bins": WEAK_BINS,
-            "blind_bins": BLIND_BINS, "instruction": INSTRUCTION, "files": {}}
+            "blind_bins": BLIND_BINS, "control_bins": CONTROL_BINS, "instruction": INSTRUCTION,
+            "files": old.get("files", {})}             # keep entries for tests not rebuilt now
 
-    for ti, test in enumerate(args.tests.split(",")):
-        b = Builder(tok, val, seed=args.seed * 100 + ti)     # each test has its own fixed stream
+    for test in args.tests.split(","):
+        b = Builder(tok, val, seed=args.seed * 100 + TEST_SEED[test])  # each test: own fixed stream
+        method = "t1" if test == "t1c" else test
         rows, skipped = [], 0
-        for d in BINS:
+        for d in (CONTROL_BINS if test == "t1c" else BINS):
             n_here = 0
             idx = 0
             while n_here < args.per_bin:
@@ -414,8 +431,8 @@ def main():
                     got = b.t5(idx, d, variant)
                     n_add = len(got)
                     rows += got
-                else:
-                    r = getattr(b, test)(idx, d, variant)
+                else:  # t1c rows keep id prefix "t1c" so they never mix with t1
+                    r = getattr(b, method)(idx, d, variant)
                     got, n_add = r, int(bool(r))
                     if r:
                         rows.append(r)
@@ -432,7 +449,7 @@ def main():
         dists = [r["meta"]["distance"] / r["bin"] for r in rows]
         print(f"{test}: {len(rows)} rows, skipped {skipped}, distance/bin in "
               f"[{min(dists):.3f}, {max(dists):.3f}], max tokens {max(r['meta']['n_tokens'] for r in rows)}")
-    with open(os.path.join(args.out_dir, "eval_meta.json"), "w") as f:
+    with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
     print("wrote", args.out_dir)
 

@@ -88,7 +88,7 @@ def main():
     ap.add_argument("--tokenizer", default="artifacts/tokenizer/tokenizer.json")
     ap.add_argument("--eval_dir", default="artifacts/eval")
     ap.add_argument("--out_dir", default="results")
-    ap.add_argument("--tests", default="t1,t2,t3,t4,t5")
+    ap.add_argument("--tests", default=None, help="default: every test file in eval_dir")
     ap.add_argument("--limit", type=int, default=None, help="N rows per test, spread over all bins (quick runs)")
     ap.add_argument("--greedy", action="store_true", help="also do greedy exact match (slower)")
     ap.add_argument("--tag", default=None, help="name for the output files")
@@ -116,7 +116,10 @@ def main():
     with open(out_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
-        for test in args.tests.split(","):
+        tests = args.tests.split(",") if args.tests else [
+            t for t in ["t1c", "t1", "t2", "t3", "t4", "t5"]
+            if os.path.exists(os.path.join(args.eval_dir, f"{t}.jsonl"))]
+        for test in tests:
             rows = [json.loads(line) for line in open(os.path.join(args.eval_dir, f"{test}.jsonl"))]
             if args.limit:                            # spread over all bins, not just the first
                 rows = rows[::max(1, len(rows) // args.limit)][:args.limit]

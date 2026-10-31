@@ -39,7 +39,8 @@ INK, INK2, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 REACH = 2040          # receptive field of the 8-layer, W=256 backbone
 CHANCE = 0.25
 TEST_NAMES = {"t1": "T1 Needle", "t2": "T2 Selective memory", "t3": "T3 Contradiction",
-              "t4": "T4 Multi-hop", "t5": "T5 Corruption"}
+              "t4": "T4 Multi-hop", "t5": "T5 Corruption", "t1c": "T1 control (inside window)"}
+WINDOW = 256
 
 plt.rcParams.update({
     "font.size": 10, "axes.edgecolor": INK2, "axes.labelcolor": INK, "text.color": INK,
@@ -82,14 +83,18 @@ def by_bin(df, col="correct"):
     return g
 
 
-def distance_axes(ax, ylabel="Accuracy", chance=True):
+def distance_axes(ax, ylabel="Accuracy", chance=True, xmin=200):
     ax.axvspan(REACH, 4096, color="#f0efec", zorder=0)
     ax.axvline(REACH, color=INK2, lw=1, ls=":")
-    ax.text(REACH + 60, 1.01, "beyond A's reach: only memory can help", fontsize=8, color=INK2, va="bottom")
+    ax.text(REACH + 60, 1.01, "beyond 2,040: no path for A without memory", fontsize=8, color=INK2,
+            va="bottom")
     if chance:
         ax.axhline(CHANCE, color=INK2, lw=1, ls="--")
-        ax.text(250, CHANCE + 0.015, "chance (25%)", fontsize=8, color=INK2)
-    ax.set_xlim(200, 4096)
+        ax.text(xmin + 50, CHANCE + 0.015, "chance (25%)", fontsize=8, color=INK2)
+    if xmin < WINDOW:
+        ax.axvline(WINDOW, color=INK2, lw=1, ls=":")
+        ax.text(WINDOW + 30, 1.01, "256-token window", fontsize=8, color=INK2, va="bottom")
+    ax.set_xlim(xmin, 4096)
     ax.set_ylim(0, 1.0)
     ax.set_xlabel("Distance from fact to question (tokens)")
     ax.set_ylabel(ylabel)
@@ -122,10 +127,11 @@ def line_by_model(ax, df, col="correct"):
 
 def fig_needle(df, out):
     fig, ax = plt.subplots(figsize=(7, 4.2))
-    line_by_model(ax, df[df["test"] == "t1"])
-    distance_axes(ax)
-    ax.set_title("T1 Needle: can the model recall a fact from far back?", loc="left", fontsize=11, pad=18)
-    ax.legend(loc="lower left", fontsize=8)
+    has_control = (df["test"] == "t1c").any()      # control points: needles inside the window
+    line_by_model(ax, df[df["test"].isin(["t1", "t1c"])])
+    distance_axes(ax, xmin=0 if has_control else 200)
+    ax.set_title("T1 Needle: can the model recall a fact from far back?", loc="left", fontsize=11, pad=36)
+    ax.legend(fontsize=8, loc="lower left", bbox_to_anchor=(0, 1.06), ncol=3, borderaxespad=0.2)
     fig.tight_layout()
     fig.savefig(os.path.join(out, "fig1_needle.png"), dpi=200)
     plt.close(fig)
@@ -257,8 +263,9 @@ def write_tables(df, eff, out):
     models = [m for m in STYLE if m in df["model"].unique()]
     lines.append("| Test | Regime | " + " | ".join(models) + " |")
     lines.append("|---|---|" + "---|" * len(models))
-    for t in sorted(df["test"].unique()):
-        for regime in ["weak", "blind"]:
+    order = ["t1c", "t1", "t2", "t3", "t4", "t5"]
+    for t in sorted(df["test"].unique(), key=lambda x: order.index(x) if x in order else 99):
+        for regime in ["control", "weak", "blind"]:
             cells = []
             for v in models:
                 s = df[(df["test"] == t) & (df["regime"] == regime) & (df["model"] == v)]["correct"]
@@ -267,8 +274,10 @@ def write_tables(df, eff, out):
                     continue
                 lo, hi = wilson(s.sum(), len(s))
                 cells.append(f"{s.mean():.1%} [{lo:.0%}-{hi:.0%}] (n={len(s)})")
-            lines.append(f"| {TEST_NAMES.get(t, t)} | {regime} | " + " | ".join(cells) + " |")
-    lines.append("\nweak = 300-2,000 tokens back (A can partly reach); "
+            if any(c != "-" for c in cells):
+                lines.append(f"| {TEST_NAMES.get(t, t)} | {regime} | " + " | ".join(cells) + " |")
+    lines.append("\ncontrol = 60-200 tokens back (inside the 256-token window); "
+                 "weak = 300-2,000 tokens back (A's theoretical multi-layer reach); "
                  "blind = 2,500-3,900 tokens back (beyond A's 2,040-token reach).\n")
 
     t3 = df[df["test"] == "t3"]

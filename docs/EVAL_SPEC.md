@@ -66,6 +66,17 @@ None of the training keys, values, words or sentence shapes from spec 4b may app
 - **Varies:** d over all 9 bins.
 - **Reported:** accuracy vs d, weak and blind regimes separately.
 
+### T1c — Control: needle inside the window (added Oct 31)
+- **Measures:** whether the model and the scoring work at all, separate from memory.
+- **Input:** same as T1, but the fact is only 60, 120 or 200 tokens back, inside the
+  256-token attention window. 100 examples per bin, file `t1c.jsonl`.
+- **Reported:** accuracy per bin, as the "control" regime.
+- **Expected:** high for every variant. Variant A instruct scored 94–96% (Oct 31).
+  A variant that fails here has a model or format problem, not a memory problem.
+- **Why it was added:** A scored about 25% from 300 tokens out on every test. The
+  control shows the drop is a real limit of the model (its effective reach is the
+  256-token window, not the 2,040-token theoretical reach), not a broken test.
+
 ### T2 — Selective memory
 - **Measures:** whether the model stores the useful fact instead of everything.
 - **Input:** the target fact plus k distractor facts of the same type about other
