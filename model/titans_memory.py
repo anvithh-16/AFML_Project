@@ -1,16 +1,18 @@
 """
-Memory module for Variants B (always-on) and C (learned gating).
-Implements docs/MEMORY_SPEC.md. Interface matches docs/ARCHITECTURE_SPEC.md section 3.
+model/titans_memory.py: Variants B (always-on) and C (learned gating).
+Implements docs/MEMORY_SPEC.md on top of the base class in model/memory.py.
 
-Per chunk the backbone does:
-    r     = memory.read(h, state)      # residual, (B,C,d)
-    h     = h + r
-    state = memory.write(h, state)     # (or write from the pre-read h; see spec Q1)
+Per chunk the backbone does (team decision Oct 29: write from PRE-read h):
+    r     = memory.read(h, state)
+    state = memory.write(h, state)
+    out   = h + r
 """
 from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from model.memory import MemoryModule
 
 DEFAULTS = dict(
     n_heads=8, d_k=64, d_v=64,
@@ -62,28 +64,13 @@ def surprise(err, v):
     return ((err ** 2).sum(-1) / ((v ** 2).sum(-1) + EPS)).detach()
 
 
-class NullMemory(nn.Module):
-    """Variant A: same code path, no memory."""
-    def __init__(self, cfg=None):
-        super().__init__()
 
-    def init_state(self, batch_size, device, dtype=None):
-        return MemoryState(M=torch.zeros(batch_size, 1, 1, 1, device=device))
+class TitansMemory(MemoryModule):
+    is_null = False
 
-    def read(self, h, state):
-        return torch.zeros_like(h)
-
-    def write(self, h, state):
-        return state
-
-    def stats(self):
-        return {}
-
-
-class MemoryModule(nn.Module):
     def __init__(self, cfg, variant: str = "B"):
         super().__init__()
-        assert variant in ("B", "C"), "use NullMemory for variant A"
+        assert variant in ("B", "C"), "variant A is NullMemory in model/memory.py"
         m = {**DEFAULTS, **cfg.memory}
         self.variant = variant
         self.H, self.dk, self.dv = m["n_heads"], m["d_k"], m["d_v"]
@@ -158,3 +145,15 @@ class MemoryModule(nn.Module):
 
     def stats(self):
         return {k: float(v) for k, v in self._stats.items()}
+
+
+class AlwaysOnMemory(TitansMemory):
+    """Variant B: write every token, always read."""
+    def __init__(self, cfg):
+        super().__init__(cfg, "B")
+
+
+class GatedMemory(TitansMemory):
+    """Variant C: learned write (surprise) gate and need gate."""
+    def __init__(self, cfg):
+        super().__init__(cfg, "C")

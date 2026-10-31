@@ -1,11 +1,13 @@
 """
-Unit tests for memory.py (spec section 8). Run:  python test_memory.py   or   pytest -q
-Needs config.py and memory.py in the same folder. CPU is enough.
+Unit tests for model/titans_memory.py (spec section 8).
+Run from the repo root:  python -m pytest tests/test_titans_memory.py -q
+CPU is enough.
 """
 import torch
 import torch.nn.functional as F
 from config import ModelConfig
-from memory import MemoryModule, NullMemory, MemoryState, delta_write, retrieve
+from model.memory import NullMemory
+from model.titans_memory import TitansMemory, MemoryState, delta_write, retrieve
 
 torch.manual_seed(0)
 B, C, D = 2, 8, 64
@@ -14,8 +16,7 @@ B, C, D = 2, 8, 64
 def make(variant="B", **mem):
     cfg = ModelConfig(d_model=D, n_heads=4,
                       memory={"variant": variant, "n_heads": 4, "d_k": 16, "d_v": 16, **mem})
-    m = MemoryModule(cfg, variant)
-    return m
+    return TitansMemory(cfg, variant)
 
 
 def randomize_out(m):

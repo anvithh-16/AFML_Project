@@ -71,4 +71,10 @@ def build_memory(model_cfg) -> MemoryModule:
     #   from model.titans_memory import AlwaysOnMemory, GatedMemory
     #   if variant == "B": return AlwaysOnMemory(model_cfg)
     #   if variant == "C": return GatedMemory(model_cfg)
-    raise NotImplementedError(f"memory variant {variant!r} is not implemented yet (Person B)")
+    if variant == "B":
+        from model.titans_memory import AlwaysOnMemory
+        return AlwaysOnMemory(model_cfg)
+    if variant == "C":
+        from model.titans_memory import GatedMemory
+        return GatedMemory(model_cfg)
+    raise ValueError(f"unknown memory variant {variant!r}")
