@@ -135,7 +135,10 @@ class SLM(nn.Module):
         self.register_buffer("rope_cos", cos, persistent=False)
         self.register_buffer("rope_sin", sin, persistent=False)
 
-        self.apply(self._init_weights)
+        # Initialise the backbone only. The memory module owns its init (e.g. a zero W_O so
+        # Variants B and C compute exactly what A computes at step 0).
+        for part in (self.tok_emb, self.lower, self.upper, self.norm, self.lm_head):
+            part.apply(self._init_weights)
         # GPT-2 style: shrink the residual-branch output projections by 1/sqrt(2L)
         for name, p in self.named_parameters():
             if name.endswith("attn.out.weight") or name.endswith("mlp.down.weight"):
