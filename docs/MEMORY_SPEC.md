@@ -27,7 +27,7 @@ subtracts the old prediction, so stale facts are replaced instead of piling up.
 
 Report the +3.5% parameter overhead of B and C versus A in the write-up.
 
-## 3. Write (per chunk t, after read)
+## 3. Write (per chunk t, from the PRE-read h; team decision Oct 29)
 
 ```
 k = L2norm(W_K h)            (B,C,H,d_k)     keys are unit length
@@ -120,11 +120,10 @@ Only ablation 1 costs compute, so ablations 2 and 3 fit the Nov 13–15 window.
 6. Gate sanity (C): repeated identical pair gives a falling write gate; novel pair high.
 7. Stability: 16 chunks of random fp16 input, no NaN, `|M|_F` bounded.
 
-## 9. Questions for the Oct 28 check-in
+## 9. Questions and decisions
 
-1. **Write from pre-read `h`?** Spec §3 writes from `h + r`, which stores retrieved
-   content back into memory (feedback). Preferred: write from `h` before the residual add,
-   a one-line change in the backbone loop.
+1. **Write from pre-read `h`?** DECIDED (Oct 29, Anvith): yes. The backbone writes
+   chunk t's own pre-read features, so retrieved content is never stored back.
 2. **Parameter budget:** accept +3.5% for B and C, or shrink `d_k` to 32 to narrow it?
 3. **Throughput:** B and C will be slower than A. I will report tokens/sec on the first
    30 steps so `target_tokens` can be cut for all three together if needed.
