@@ -5,13 +5,18 @@
 | `config.py` | Shared hyperparameters for A/B/C (run it to print size and FLOPs) |
 | `tokenizer/train_tokenizer.py` | Trains the shared 8k byte-level BPE |
 | `data/prepare_pretrain.py` | Streams FineWeb-Edu into `train.bin` / `val.bin` (resumable) |
-| `data/loader.py` | Memmap batch loader used by every training script |
+| `data/make_synth.py` | Synthetic long-range examples (5% of pretraining rows) |
+| `data/loader.py` | Memmap batch loader, with the synthetic mix |
+| `data/instruct_format.py` | The one prompt template, shared by instruction tuning and eval |
+| `data/prepare_instruct.py` | Dolly-15k → fixed train/val split |
 | `model/transformer.py` | Decoder backbone: RMSNorm, RoPE, SwiGLU, sliding-window attention, memory hook |
-| `model/memory.py` | Memory interface + `NullMemory` (Variant A); Person B adds B and C here |
-| `train/pretrain.py` | Pretraining with fp16, cosine LR, val loss, exact resume, Kaggle time limit |
-| `tests/test_model.py` | Causality, receptive field, param count, memory-hook tests (CPU, ~10 s) |
-| `docs/ARCHITECTURE_SPEC.md` | Dims, context, memory interface, shared settings |
-
+| `model/memory.py` | Memory interface, `NullMemory` (Variant A), `build_memory` |
+| `model/titans_memory.py` | Titans-style memory for Variants B (always-on) and C (gated) |
+| `train/pretrain.py` | Pretraining: fp16, cosine LR, val loss, exact resume, Kaggle time limit |
+| `train/instruct.py` | Instruction tuning: response-only loss, best-val checkpoint, samples |
+| `eval/` | Test generator, runner (choice log-prob), efficiency test, plots |
+| `tests/` | Backbone, memory and instruction-data tests (CPU, seconds) |
+| `docs/` | Architecture, memory and eval specs; training log |
 Data is already built: Kaggle dataset **AFML_Project_Data** (`tokenizer_sha 7f469545b846`).
 
 ## Pretrain on Kaggle (Accelerator: GPU T4, Internet can be off)

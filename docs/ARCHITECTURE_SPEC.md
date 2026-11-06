@@ -28,14 +28,14 @@ interface Person B plugs memory into. Anything here changes only at a check-in.
 
 Consequences everyone must be able to explain:
 
-- **Receptive field (corrected Oct 27, verified in `tests/test_model.py`).**
-  One layer sees 256 tokens back, but stacked windows let information hop back
-  one window per layer: the backbone's indirect reach is
-  L·(W−1) = 8·255 = **2,040 tokens**. Each hop is lossy, so recall from 300–2,040
-  tokens back is possible but weak; **beyond 2,040 tokens Variant A is strictly
-  blind** and only memory can help. Eval should place needles in both regimes
-  (≈300–2,000 tokens back and > 2,040 tokens back, up to 4,096) and report them
-  separately.
+- **Receptive field: theoretical vs effective (updated Nov 6 from the Variant A baseline).**
+  One layer sees 256 tokens back. Stacked windows give a *theoretical* indirect
+  reach of L·(W−1) = 8·255 = 2,040 tokens, but the Variant A baseline shows an
+  *effective* reach of about the window: 95% accuracy with the fact 60–200 tokens
+  back (t1c), chance (~25%) from 300 tokens back on every test. The model never
+  learned to relay a specific fact through 8 layers. So any B/C gain beyond
+  300 tokens is attributable to memory. Weak (300–2,000) and blind (≥2,500)
+  ranges are still reported separately to see whether memory degrades with distance.
 - A 1024-token training sequence = 4 chunks, so memory is exercised during
   pretraining (3 write→read hand-offs per sequence). At eval, 4096 = 16 chunks.
 - RoPE never sees offsets > 256, so evaluating at 4096 does not stress
