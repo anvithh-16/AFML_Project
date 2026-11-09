@@ -26,7 +26,7 @@ is what the long-range eval decides.
 | Variant | Answer val loss before → best | Best step | Checkpoint |
 |---|---|---|---|
 | A | 2.954 → 2.782 | 800 | variant-A_instruct_20261028.pt |
-| B | 3.017 → 2.820 | STEP | variant-B_instruct_20261106.pt |
+| B | 3.017 → 2.820 | 800 | variant-B_instruct_20261106.pt |
 | C | – | – | – |
 
 ## Eval baseline: Variant A (instruction-tuned)
