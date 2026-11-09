@@ -1,8 +1,13 @@
 """
 Unit tests for model/titans_memory.py (spec section 8).
-Run from the repo root:  python -m pytest tests/test_titans_memory.py -q
+Run from anywhere:  python tests/test_titans_memory.py   or   python -m pytest tests/test_titans_memory.py -q
 CPU is enough.
 """
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
+
 import torch
 import torch.nn.functional as F
 from config import ModelConfig

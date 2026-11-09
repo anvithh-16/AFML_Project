@@ -41,15 +41,18 @@ def retrieve(q, M):
     return torch.einsum("bthk,bhkv->bthv", q, M)
 
 
-def delta_write(M, k, v, w, theta, decay, S=None, momentum=0.0):
+def delta_write(M, k, v, w, theta, decay, S=None, momentum=0.0, err=None):
     """
     One error-correcting step on ||k M - v||^2, mean over the T tokens of the chunk.
-    M (B,H,dk,dv), k (B,T,H,dk) unit norm, v (B,T,H,dv), w (B,T,H) in [0,1],
-    theta (H,) in (0,2). Returns (M_new, S_new, err).
+    M (B,H,dk,dv), k (B,T,H,dk) unit norm, v (B,T,H,dv), w (B,T,H) in [0,1] or None
+    (= write everything), theta (H,) in (0,2). err = v - k M may be passed in to save a
+    matmul. Returns (M_new, S_new, err).
     """
     T = k.shape[1]
-    err = v - retrieve(k, M)                                   # (B,T,H,dv)
-    dM = torch.einsum("bthk,bthv->bhkv", k, w.unsqueeze(-1) * err)
+    if err is None:
+        err = v - retrieve(k, M)                               # (B,T,H,dv)
+    werr = err if w is None else w.unsqueeze(-1) * err
+    dM = torch.einsum("bthk,bthv->bhkv", k, werr)
     dM = dM * (theta.view(1, -1, 1, 1) / T)
     if momentum > 0.0:
         S = dM if S is None else momentum * S + dM
@@ -63,6 +66,14 @@ def surprise(err, v):
     """Normalised prediction error per token per head, detached. (B,T,H)"""
     return ((err ** 2).sum(-1) / ((v ** 2).sum(-1) + EPS)).detach()
 
+
+
+def _lin(lin, h):
+    """Run a projection in the ambient precision (fp16 under CUDA autocast, so it uses
+    tensor cores), return fp32 for the state maths. Without autocast, run in fp32."""
+    if not torch.is_autocast_enabled():
+        h = h.float()
+    return lin(h).float()
 
 
 class TitansMemory(MemoryModule):
@@ -94,7 +105,7 @@ class TitansMemory(MemoryModule):
                 nn.init.normal_(lin.weight, std=0.02)
                 nn.init.zeros_(lin.bias)
 
-        self._stats = {}
+        self._raw = {}
 
     # -- state -------------------------------------------------------------
     def init_state(self, batch_size, device, dtype=None):
@@ -108,43 +119,51 @@ class TitansMemory(MemoryModule):
     # -- read --------------------------------------------------------------
     def read(self, h, state):
         B, T, _ = h.shape
+        q = F.normalize(_lin(self.W_Q, h).view(B, T, self.H, self.dk), dim=-1)
         with torch.autocast(device_type=h.device.type, enabled=False):
-            h32 = h.float()
-            q = F.normalize(self.W_Q(h32).view(B, T, self.H, self.dk), dim=-1)
             r = retrieve(q, state.M)                                   # (B,T,H,dv)
             r_hat = r * torch.rsqrt((r ** 2).mean(-1, keepdim=True) + EPS)
             if self.variant == "C":
                 conf = torch.log1p(r.norm(dim=-1))                     # (B,T,H)
-                g = torch.sigmoid(self.w_r(h32) + self.c * conf)
+                g = torch.sigmoid(_lin(self.w_r, h) + self.c * conf)
+                r_hat = g.unsqueeze(-1) * r_hat
             else:
-                g = torch.ones(B, T, self.H, device=h.device)
-            out = self.read_strength * self.W_O((g.unsqueeze(-1) * r_hat).reshape(B, T, -1))
-        self._stats["read_gate"] = g.detach().mean()
-        self._stats["read_norm"] = r.detach().norm(dim=-1).mean()
+                g = None                                               # always on
+        out = self.read_strength * _lin(self.W_O, r_hat.reshape(B, T, -1))
+        self._raw["read_gate"], self._raw["r"] = g, r.detach()          # reduced lazily in stats()
         return out.to(h.dtype)
 
     # -- write -------------------------------------------------------------
     def write(self, h, state):
         B, T, _ = h.shape
+        k = F.normalize(_lin(self.W_K, h).view(B, T, self.H, self.dk), dim=-1)
+        v = _lin(self.W_V, h).view(B, T, self.H, self.dv)
         with torch.autocast(device_type=h.device.type, enabled=False):
-            h32 = h.float()
-            k = F.normalize(self.W_K(h32).view(B, T, self.H, self.dk), dim=-1)
-            v = self.W_V(h32).view(B, T, self.H, self.dv)
             err = v - retrieve(k, state.M)
-            s = surprise(err, v)
             if self.variant == "C":
-                w = torch.sigmoid(self.beta * (s - self.tau) + self.u(h32))
+                s = surprise(err, v)
+                w = torch.sigmoid(self.beta * (s - self.tau) + _lin(self.u, h))
             else:
-                w = torch.ones_like(s)
+                s, w = None, None                                      # B: no gate, no surprise
             M_new, S_new, _ = delta_write(state.M, k, v, w, self._theta(), self.decay,
-                                          state.S, self.momentum)
-        self._stats["write_rate"] = w.detach().mean()
-        self._stats["mean_surprise"] = s.mean()
-        self._stats["M_fro"] = M_new.detach().flatten(2).norm(dim=-1).mean()
+                                          state.S, self.momentum, err=err)
+        self._raw["w"] = None if w is None else w.detach()
+        self._raw["s"] = s
+        self._raw["M"] = M_new.detach()
         return MemoryState(M_new, S_new)
 
     def stats(self):
-        return {k: float(v) for k, v in self._stats.items()}
+        """Reductions happen here (when logging), not on every forward step."""
+        raw, out = self._raw, {}
+        if "M" in raw:
+            out["M_fro"] = float(raw["M"].flatten(2).norm(dim=-1).mean())
+            out["write_rate"] = 1.0 if raw["w"] is None else float(raw["w"].mean())
+        if raw.get("s") is not None:
+            out["mean_surprise"] = float(raw["s"].mean())
+        if "r" in raw:
+            out["read_norm"] = float(raw["r"].norm(dim=-1).mean())
+            out["read_gate"] = 1.0 if raw["read_gate"] is None else float(raw["read_gate"].detach().mean())
+        return out
 
 
 class AlwaysOnMemory(TitansMemory):
