@@ -27,7 +27,7 @@ is what the long-range eval decides.
 |---|---|---|---|
 | A | 2.954 → 2.782 | 800 | variant-A_instruct_20261028.pt |
 | B | 3.017 → 2.820 | 800 | variant-B_instruct_20261106.pt |
-| C | – | – | – |
+| C | 2.962 → 2.783 | 800 | variant-C_instruct_20261109.pt |
 
 ## Eval baseline: Variant A (instruction-tuned)
 
