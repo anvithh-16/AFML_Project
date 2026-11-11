@@ -59,7 +59,7 @@ def theoretical(model, T):
             tensors = list(vars(state).values())          # e.g. TitansMemory's MemoryState
         else:
             tensors = list(state)
-        mem = sum(t.numel() for t in tensors if torch.is_tensor(t)) * 2 / 2**20
+        mem = sum(t.numel() * t.element_size() for t in tensors if torch.is_tensor(t)) / 2**20  # real dtype (fp32)
     return {"attn_gflops": round(attn_gflops, 2), "kv_cache_mb": round(kv_cache_mb, 2),
             "mem_state_mb": round(mem, 2)}
 
