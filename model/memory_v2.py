@@ -34,7 +34,7 @@ What changed from v1 and why (docs/MEMORY_V2_SPEC.md has the full story):
 B vs C (the only difference between them):
                    write weight w_t          read                 forget f_t
     B              1                          always               learned constant per head
-    C              sigmoid(beta*(surprise-tau) + u.h)   gate g = sigmoid(w_r.h + c*conf + b), b=+2 (opens at init)
+    C              sigmoid(beta*(surprise-tau) + u.h + b_w), b_w=+2   gate g = sigmoid(w_r.h + c*conf + b), b=+2 (opens at init)
                                                                     sigmoid(f.h + b_f) per token
 
 W_O is zero-initialised, so B and C start exactly equal to Variant A.
@@ -60,6 +60,8 @@ DEFAULTS = dict(
     momentum_max=0.5,     # eta = momentum_max * sigmoid(raw)
     tau=0.5,              # C: surprise threshold of the write gate
     read_gate_bias=2.0,   # C: read gate starts open, sigmoid(2) = 0.88
+    write_gate_bias=2.0,  # C: write gate starts open (~0.83 even once memory is full), so C
+                          #    starts like B and has to LEARN to skip tokens
     read_strength=1.0,
     detach_chunks=False,  # True = cut gradients between chunks (saves memory)
 )
@@ -190,7 +192,7 @@ class MemoryV2(MemoryModule):
             for lin in (self.f, self.u, self.w_r):
                 nn.init.normal_(lin.weight, std=0.02)
             nn.init.constant_(self.f.bias, _logit(f0))
-            nn.init.zeros_(self.u.bias)
+            nn.init.constant_(self.u.bias, m["write_gate_bias"])
             nn.init.constant_(self.w_r.bias, m["read_gate_bias"])
         self._raw = {}
 
