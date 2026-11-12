@@ -152,6 +152,7 @@ def main():
                     rows_[0] = tr                                   # a story that is also in train
                 with open(os.path.join(p, f"{task}.jsonl"), "w") as f:
                     f.writelines(json.dumps(r_) + "\n" for r_ in rows_)
+    os.remove(os.path.join(bl, "babilong-train-5k-samples", "1k", "qa2.jsonl"))   # like the real qa3/1k gap
     dolly = os.path.join(d, "dolly"); os.makedirs(dolly)
     from data.instruct_format import encode_example
     for split, n in (("train", 30), ("val", 5)):
@@ -174,6 +175,7 @@ def main():
     assert m["train_examples"]["dolly"] == 30 and m["train_examples"]["babilong"] > 0
     assert m["cells"]["qa1/4k"]["train"]["dropped_too_long"] > 0, "max_len not applied"
     assert va["raw"][0]["category"] == "dolly", "Dolly val must come first"
+    assert m["cells"]["qa2/1k"] == "missing in source", "a missing (task, length) must be skipped"
     assert m["test_cells"]["qa1/1k"]["removed_seen_in_train"] >= 1, "train/test overlap not removed"
     assert te["choices"]["qa1"] == sorted(places)
     ex = next(r for r in tr["raw"] if r["category"].startswith("babilong"))
