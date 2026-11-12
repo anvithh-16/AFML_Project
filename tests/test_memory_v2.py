@@ -90,6 +90,19 @@ def test_saturated_gates_stay_finite():
     print("ok  saturated gates (sigmoid = 1.0): loss and every gradient stay finite")
 
 
+def test_write_gate_starts_open():
+    """C must start close to B: write gate high whether memory is empty (surprise ~1)
+    or already predicts the chunk (surprise ~0.4), so selectivity has to be learned."""
+    m = MemoryV2(v2_cfg("C"), "C")
+    for s, lo in ((1.0, 0.75), (0.4, 0.75), (0.2, 0.6)):  # Kaggle run: mean surprise 0.3-0.5
+        w = torch.sigmoid(m.beta * (s - m.tau) + m.u.bias)
+        assert (w > lo).all(), (s, w)
+    m0 = MemoryV2(v2_cfg("C", write_gate_bias=0.0), "C")
+    assert (torch.sigmoid(m0.beta * (0.4 - m0.tau) + m0.u.bias) < 0.5).all()  # the old behaviour
+    print("ok  C's write gate starts open (0.95 / 0.83 / 0.69 at surprise 1.0 / 0.4 / 0.2); "
+          "bias 0 = old closing gate (0.40 at 0.4)")
+
+
 def test_registry():
     cfg = tiny_cfg(d_model=D, n_heads=4)
     for variant in ("B", "C"):
@@ -200,6 +213,7 @@ if __name__ == "__main__":
     test_shift_values()
     test_future_values_keep_order()
     test_saturated_gates_stay_finite()
+    test_write_gate_starts_open()
     test_registry()
     test_causal()
     test_step0_equals_A()

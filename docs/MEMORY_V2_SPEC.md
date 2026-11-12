@@ -37,7 +37,7 @@ start exactly equal to A).
 | | Write weight w_t | Read | Forget f_t |
 |---|---|---|---|
 | **B** (always on) | 1 | always | one learned rate per head |
-| **C** (learned policy) | `sigmoid(beta (surprise - tau) + u.h)` | gate `sigmoid(w_r.h + c log(1+|r|) + b)`, **b = +2 so it starts open** | `sigmoid(f.h + b_f)` per token |
+| **C** (learned policy) | `sigmoid(beta (surprise - tau) + u.h + b_w)`, **b_w = +2 so it starts open** | gate `sigmoid(w_r.h + c log(1+|r|) + b)`, **b = +2 so it starts open** | `sigmoid(f.h + b_f)` per token |
 
 Surprise = `|v - kM|^2 / |v|^2` per token (detached), measured before each 64-token step.
 Extra parameters over A: ~1.05M (B), ~1.06M (C).
@@ -85,6 +85,13 @@ v1 does not. Absolute recall is still low at this tiny size and budget; one seed
 - B's plateau near 20%: a plain mean of the next 4 tokens is order-blind, so "v1 v2" and
   "v2 v1" were stored the same. Now learned per-offset taps (`value_taps`, init = mean).
 - The bench now stops a variant at its first non-finite loss or gradient and says where.
+
+**Rerun with the fixes (Kaggle, 10,000 steps):** B v2 far **0.461** (from ~0.20; climbing to
+~9k steps), C v2 far **0.259**, no NaN. Step time vs A: B 1.65x, C 1.9x.
+C's write gate closed mechanically as memory filled (surprise ~0.4 gives
+sigmoid(4(0.4-0.5)) ~ 0.4) and dropped fact tokens with filler; in this toy surprise cannot
+tell them apart. Now `write_gate_bias = +2`: C starts like B (gate ~0.83 with a full
+memory) and has to learn to skip tokens, the same principle as the open read gate.
 
 ## 5. Training protocol (identical for A, B, C except the memory)
 
