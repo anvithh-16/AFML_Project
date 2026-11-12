@@ -15,6 +15,11 @@ Synthetic mixing (optional): each TRAIN row is, with probability synth_frac, a
 synthetic long-range example placed at the start of the row, with a random
 FineWeb window filling the rest. Val is never mixed, so val loss stays pure
 FineWeb and comparable with or without mixing.
+
+Row format (data/prepare_pg19.py, meta.json "format": "rows"): train.bin and val.bin
+hold fixed rows of row_len = seq_len + 1 tokens, each one continuous stretch of one book
+(or one FineWeb window). Batches then use WHOLE rows only, never a window across two
+rows, so a row's memory sees a single text from start to end.
 """
 import json
 import os
@@ -30,12 +35,18 @@ class TokenLoader:
         self.meta = json.load(open(os.path.join(data_dir, "meta.json")))
         self.paths = {s: os.path.join(data_dir, f"{s}.bin") for s in ("train", "val")}
         self.rng = np.random.default_rng(seed)
+        self.row_len = self.meta.get("row_len") if self.meta.get("format") == "rows" else None
+        if self.row_len:
+            assert seq_len == self.row_len - 1, \
+                f"this data has rows of {self.row_len} tokens: use --seq_len {self.row_len - 1}"
         for s, p in self.paths.items():
             n = os.path.getsize(p) // 2
             expected = self.meta["tokens"][s]
             assert n == expected, (f"{s}.bin has {n:,} tokens but meta.json says {expected:,}; "
                                    "data prep was interrupted or re-run. Re-run prepare_pretrain.py.")
             assert n > seq_len + 1, f"{s}.bin has only {n} tokens (< seq_len+1)"
+            if self.row_len:
+                assert n % self.row_len == 0, f"{s}.bin is not a whole number of rows"
 
         self.synth_frac, self.synth_meta = 0.0, None
         if synth_dir and synth_frac > 0:
@@ -61,7 +72,10 @@ class TokenLoader:
 
     def get_batch(self, split="train"):
         data, T = self._mm(split), self.seq_len
-        ix = self.rng.integers(0, len(data) - T - 1, size=self.batch_size)
+        if self.row_len:                                   # whole rows only
+            ix = self.rng.integers(0, len(data) // self.row_len, size=self.batch_size) * self.row_len
+        else:
+            ix = self.rng.integers(0, len(data) - T - 1, size=self.batch_size)
         rows = np.stack([data[i:i + T + 1] for i in ix])
         if split == "train" and self.synth_frac > 0:
             synth = np.memmap(self.synth_path, dtype=np.uint16, mode="r")
@@ -73,8 +87,10 @@ class TokenLoader:
 
     def val_batches(self, max_batches=None):
         data, T, B = self._mm("val"), self.seq_len, self.batch_size
-        n_windows = (len(data) - 1) // T
-        starts = np.arange(n_windows) * T
+        if self.row_len:
+            starts = np.arange(len(data) // self.row_len) * self.row_len
+        else:
+            starts = np.arange((len(data) - 1) // T) * T
         nb = len(starts) // B if max_batches is None else min(max_batches, len(starts) // B)
         for b in range(nb):
             ix = starts[b * B:(b + 1) * B]
