@@ -51,13 +51,46 @@ def context_of(story, question):
     return f"{story.strip()}\n\nQuestion: {question.strip()}"
 
 
+def _parse_json(text):
+    """A BABILong file: a JSON list, a dict of records, a dict of columns, or JSON lines."""
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return [json.loads(l) for l in text.splitlines() if l.strip()]
+    if isinstance(obj, list):
+        return obj
+    vals = list(obj.values())
+    if vals and all(isinstance(v, dict) for v in vals):
+        return vals
+    if vals and all(isinstance(v, list) for v in vals):                 # columns
+        return [dict(zip(obj.keys(), row)) for row in zip(*vals)]
+    raise ValueError("unrecognised BABILong file layout")
+
+
 def load_split(repo, length, task, local_dir):
-    """List of {input, question, target}."""
+    """List of {input, question, target}, or None if this (task, length) does not exist.
+    Files are read one by one: asking `datasets` for a whole length config fails when the
+    repo lists a file that is missing (the train repo has no qa3/1k.json)."""
     if local_dir:
         p = os.path.join(local_dir, os.path.basename(repo), length, f"{task}.jsonl")
-        return [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()]
-    from datasets import load_dataset
-    return list(load_dataset(repo, length, split=task))
+        return [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()] if os.path.exists(p) else None
+    from huggingface_hub import HfFileSystem
+    fs = HfFileSystem()
+    base = f"datasets/{repo}"
+    files = sorted(fs.glob(f"{base}/data/{task}/{length}.json*") + fs.glob(f"{base}/{length}/{task}-*"))
+    if not files:
+        return None
+    rows = []
+    for f in files:
+        if f.endswith(".parquet"):
+            import pandas as pd
+            with fs.open(f, "rb") as fh:
+                rows += pd.read_parquet(fh).to_dict("records")
+        else:
+            with fs.open(f, "r", encoding="utf-8") as fh:
+                rows += _parse_json(fh.read())
+    rows = [{k: r[k] for k in ("input", "question", "target")} for r in rows]
+    return rows
 
 
 def story_hash(s):
@@ -99,6 +132,10 @@ def main():
     for task in args.tasks:
         for length in args.train_lengths:
             rows = load_split(TRAIN_REPO, length, task, args.local_dir)
+            if rows is None:
+                print(f"train {task}/{length}: not in {TRAIN_REPO}, skipped")
+                meta["cells"][f"{task}/{length}"] = "missing in source"
+                continue
             order = rng.permutation(len(rows))
             picks = {"train": order[:args.train_per_cell],
                      "val": order[args.train_per_cell:args.train_per_cell + args.val_per_cell]}
@@ -141,6 +178,10 @@ def main():
         answers = set()
         for length in args.test_lengths:
             rows = load_split(TEST_REPO, length, task, args.local_dir)
+            if rows is None:
+                print(f"test {task}/{length}: not in {TEST_REPO}, skipped")
+                meta["test_cells"][f"{task}/{length}"] = "missing in source"
+                continue
             answers |= {r["target"].strip() for r in rows}
             kept = dup = 0
             for i in rng.permutation(len(rows)):
