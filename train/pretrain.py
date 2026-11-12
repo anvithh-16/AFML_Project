@@ -47,6 +47,11 @@ def parse_args():
     p, m = PretrainConfig(), ModelConfig()
     ap = argparse.ArgumentParser()
     ap.add_argument("--variant", default="A", choices=["A", "B", "C"])
+    ap.add_argument("--memory_version", type=int, default=1, choices=[1, 2],
+                    help="B/C memory: 1 = model/titans_memory.py (old runs), 2 = model/memory_v2.py")
+    ap.add_argument("--init_from", default=None,
+                    help="fresh run only: start the BACKBONE from this checkpoint (e.g. Variant A's); "
+                         "memory weights are new. Use the same start for A, B and C.")
     ap.add_argument("--data_dir", default=DataConfig().out_dir)
     ap.add_argument("--synth_dir", default=None,
                     help="synthetic long-range examples (data/make_synth.py); team default: use them")
@@ -89,6 +94,9 @@ def model_config(args, data_vocab):
         assert data_vocab == cfg.vocab_size, f"data vocab {data_vocab} != model vocab {cfg.vocab_size}"
         cfg.train_seq_len = args.seq_len
     cfg.memory = dict(cfg.memory, variant=args.variant)
+    if args.memory_version != 1:         # key only added when used, so old runs resume unchanged
+        assert args.variant != "A", "--memory_version only applies to B and C"
+        cfg.memory["version"] = args.memory_version
     if args.tiny:
         cfg.memory["insert_after_layer"] = cfg.n_layers // 2
     return cfg
@@ -176,6 +184,16 @@ def main():
             torch.cuda.set_rng_state(ck["cuda_rng"])
         log_rows = ck.get("log", [])
         print(f"resumed from {resume_path} at step {step}")
+    elif args.init_from:
+        ck = torch.load(args.init_from, map_location=device, weights_only=False)
+        assert ck.get("tokenizer_sha", meta["tokenizer_sha"]) == meta["tokenizer_sha"], \
+            "init checkpoint used a different tokenizer"
+        backbone = {k: v for k, v in ck["model"].items() if not k.startswith("memory.")}
+        missing, unexpected = model.load_state_dict(backbone, strict=False)
+        assert not unexpected, f"init checkpoint has unknown weights: {unexpected[:5]}"
+        assert all(k.startswith("memory.") for k in missing), f"backbone weights missing: {missing[:5]}"
+        print(f"backbone initialised from {args.init_from} ({len(backbone)} tensors); "
+              f"memory starts fresh ({len(missing)} tensors)")
 
     train_model = torch.compile(model) if args.compile else model
 
