@@ -68,6 +68,9 @@ def build_memory(model_cfg) -> MemoryModule:
     if variant == "A":
         return NullMemory()
     if variant in ("B", "C"):
-        from model.titans_memory import TitansMemory
+        if model_cfg.memory.get("version", 1) == 2:          # memory v2 (docs/MEMORY_V2_SPEC.md)
+            from model.memory_v2 import MemoryV2
+            return MemoryV2(model_cfg, variant)
+        from model.titans_memory import TitansMemory          # v1 (default: old checkpoints)
         return TitansMemory(model_cfg, variant)
     raise NotImplementedError(f"memory variant {variant!r} is not implemented yet (Person B)")
