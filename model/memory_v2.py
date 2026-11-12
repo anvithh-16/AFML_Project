@@ -12,8 +12,9 @@ What changed from v1 and why (docs/MEMORY_V2_SPEC.md has the full story):
   1. Phrase keys. Keys and queries go through a short causal depthwise conv (4 tokens),
      so a key stands for "locker 12", not just "12". The last 3 tokens of the previous
      chunk are carried in the state, so the conv also works across chunk borders.
-  2. Next-token values. Key t is stored with the mean value of tokens t+1..t+4
-     ("is 48213"), not with token t itself. v1 associated each token with itself and
+  2. Next-token values. Key t is stored with the values of tokens t+1..t+4
+     ("is 48213"), not with token t itself; a learned weight per offset and channel
+     (init = plain mean) keeps their ORDER, so "48213" and "84213" differ. v1 associated each token with itself and
      could not bind a key to its fact even in the ideal case (memory_probe: ~0).
   3. Exact delta rule in small steps. A chunk is written in steps of 64 tokens. Inside
      a step the update equals the sequential per-token delta rule
@@ -50,7 +51,8 @@ from model.memory import MemoryModule
 DEFAULTS = dict(
     n_heads=8, d_k=64, d_v=64,
     conv=4,               # causal conv width for keys and queries (1 = off)
-    value_shift=4,        # key t stored with mean value of the next s tokens (0 = own value)
+    value_shift=4,        # key t stored with the next s tokens' values (0 = own value)
+    value_taps=True,      # True: learned weight per offset and channel (keeps order), init = mean
     sub_chunk=64,         # tokens per exact delta-rule step
     theta_init=0.5,       # initial write strength per head, in (0, 1)
     decay_init=0.02,      # initial forgetting per 256 tokens (v1 used 0.02 per chunk)
@@ -111,6 +113,22 @@ def shift_values(v, s):
     return torch.where(valid.unsqueeze(-1) > 0, mean, v), valid
 
 
+def future_values(v, taps):
+    """Order-aware targets. v (B,H,T,dv) unit-RMS, taps (H,dv,s): weight of token t+j for
+    each head/channel. v_tgt[t] = sum_j taps[..., j-1] * v[t+j] over the tokens that exist
+    inside the chunk, re-normalised to unit RMS. Unlike a plain mean, swapping two following
+    tokens changes the target, so "v1 then v2" and "v2 then v1" are stored differently.
+    Returns (v_tgt, valid) like shift_values."""
+    B, H, T, dv = v.shape
+    s = taps.shape[-1]
+    vp = torch.cat([v, v.new_zeros(B, H, s, dv)], dim=2)                   # zeros past the chunk end
+    tgt = sum(taps[:, :, j].view(1, H, 1, dv) * vp[:, :, j + 1:j + 1 + T] for j in range(s))
+    t = torch.arange(T, device=v.device)
+    valid = (t + 1 < T).to(v.dtype).view(1, 1, T)
+    tgt = tgt * torch.rsqrt((tgt ** 2).mean(-1, keepdim=True) + EPS)
+    return torch.where(valid.unsqueeze(-1) > 0, tgt, v), valid
+
+
 def surprise(err, v):
     """Normalised prediction error per token, detached. (B,H,L)"""
     return ((err ** 2).sum(-1) / ((v ** 2).sum(-1) + EPS)).detach()
@@ -155,6 +173,9 @@ class MemoryV2(MemoryModule):
             with torch.no_grad():
                 c.weight[:, 0, -1] = 1.0
 
+        self.value_taps = bool(m["value_taps"]) and self.shift > 0
+        if self.value_taps:
+            self.v_taps = nn.Parameter(torch.full((H, self.dv, self.shift), 1.0 / self.shift))
         self.theta_raw = nn.Parameter(torch.full((H,), _logit(m["theta_init"])))
         self.eta_raw = nn.Parameter(torch.full((H,), _logit(m["momentum_init"] / self.momentum_max)))
         f0 = 1.0 - (1.0 - m["decay_init"]) ** (1.0 / 256)                  # per-token forget rate
@@ -202,7 +223,7 @@ class MemoryV2(MemoryModule):
         with torch.autocast(device_type=h.device.type, enabled=False):
             r = q @ state.M                                                # (B,H,T,dv)
             if self.variant == "C":
-                conf = torch.log1p(r.norm(dim=-1))                         # (B,H,T)
+                conf = torch.log1p(torch.sqrt((r ** 2).sum(-1) + EPS))     # (B,H,T), finite grad at r=0
                 g = torch.sigmoid(_lin(self.w_r, h).transpose(1, 2) + self.c.view(1, -1, 1) * conf)
                 r = g.unsqueeze(-1) * r
             else:
@@ -221,13 +242,17 @@ class MemoryV2(MemoryModule):
         v = v * torch.rsqrt((v ** 2).mean(-1, keepdim=True) + EPS)        # unit-RMS values
         if self.variant == "C":
             u = _lin(self.u, h).transpose(1, 2)                            # (B,H,T)
-            f = torch.sigmoid(_lin(self.f, h).transpose(1, 2))             # (B,H,T)
+            f_logit = _lin(self.f, h).transpose(1, 2)                      # (B,H,T)
         with torch.autocast(device_type=h.device.type, enabled=False):
-            v, valid = shift_values(v, self.shift)
+            if self.value_taps:
+                v, valid = future_values(v, self.v_taps.float())
+            else:
+                v, valid = shift_values(v, self.shift)
             theta = torch.sigmoid(self.theta_raw).view(1, -1, 1)
             eta = (self.momentum_max * torch.sigmoid(self.eta_raw)).view(1, -1, 1, 1)
             if self.variant == "B":
-                log_keep_tok = torch.log1p(-torch.sigmoid(self.forget_raw)).view(1, -1)   # (1,H)
+                # log(1 - sigmoid(x)) == -softplus(x): same value, never log(0) or an inf gradient
+                log_keep_tok = -F.softplus(self.forget_raw).view(1, -1)                # (1,H)
             M, S = state.M, state.S
             ws, ss = [], []
             for a in range(0, T, self.sub):
@@ -236,7 +261,7 @@ class MemoryV2(MemoryModule):
                 if self.variant == "B":
                     keep = torch.exp(log_keep_tok * n)                       # (1,H)
                 else:
-                    keep = torch.exp(torch.log1p(-f[:, :, a:a + n]).sum(-1))  # (B,H)
+                    keep = torch.exp(-F.softplus(f_logit[:, :, a:a + n]).sum(-1))  # (B,H)
                 M = keep[..., None, None] * M
                 err = vs - ks @ M
                 if self.variant == "C":
@@ -251,7 +276,7 @@ class MemoryV2(MemoryModule):
                 M = M + S
         self._raw.update(w=torch.cat(ws, 2).detach(), M=M.detach(),
                          s=torch.cat(ss, 2) if ss else None,
-                         f=(f.detach() if self.variant == "C" else None))
+                         f=(torch.sigmoid(f_logit).detach() if self.variant == "C" else None))
         return MemoryStateV2(M, S, self._new_tail(h, state.tail))
 
     @torch.no_grad()
