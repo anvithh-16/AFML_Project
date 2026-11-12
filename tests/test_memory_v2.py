@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) 
 import torch
 import torch.nn.functional as F
 
-from model.memory_v2 import MemoryV2, delta_step, shift_values
+from model.memory_v2 import MemoryV2, delta_step, shift_values, future_values
 from model.titans_memory import TitansMemory
 from model.transformer import SLM
 from tests.test_model import tiny_cfg, influence
@@ -46,6 +46,48 @@ def test_shift_values():
     assert tgt.flatten().tolist() == [1.5, 2.5, 3.5, 4.5, 5.0, 5.0]
     assert valid.flatten().tolist() == [1, 1, 1, 1, 1, 0]
     print("ok  values = mean of the next s tokens, last token masked")
+
+
+def test_future_values_keep_order():
+    torch.manual_seed(0)
+    H, T, dv, s = 2, 6, 4, 3
+    v = torch.randn(1, H, T, dv)
+    v = v * torch.rsqrt((v ** 2).mean(-1, keepdim=True))
+    mean_taps = torch.full((H, dv, s), 1.0 / s)
+    tgt, valid = future_values(v, mean_taps)
+    ref, _ = shift_values(v, s)
+    ref = ref * torch.rsqrt((ref ** 2).mean(-1, keepdim=True))
+    assert torch.allclose(tgt[:, :, :T - 1], ref[:, :, :T - 1], atol=1e-5), "init should be the (normalised) mean"
+    assert valid.flatten().tolist() == [1, 1, 1, 1, 1, 0]
+    taps = torch.randn(H, dv, s)                       # learned, unequal weights
+    swapped = v.clone(); swapped[:, :, [1, 2]] = v[:, :, [2, 1]]
+    a, _ = future_values(v, taps); b, _ = future_values(swapped, taps)
+    assert not torch.allclose(a[:, :, 0], b[:, :, 0]), "order of the following tokens is lost"
+    m1, _ = shift_values(v, s); m2, _ = shift_values(swapped, s)
+    assert torch.allclose(m1[:, :, 0], m2[:, :, 0]), "plain mean should be order-blind (sanity)"
+    print("ok  learned value taps start as the mean but can tell 'v1 v2' from 'v2 v1'")
+
+
+def test_saturated_gates_stay_finite():
+    """C's NaN on Kaggle: huge gate inputs must not produce inf/NaN (forget = -softplus)."""
+    for variant in ("B", "C"):
+        torch.manual_seed(0)
+        model = SLM(v2_cfg(variant))
+        torch.nn.init.normal_(model.memory.W_O.weight, std=0.1)
+        mem = model.memory
+        with torch.no_grad():
+            if variant == "C":
+                for lin in (mem.f, mem.u, mem.w_r):
+                    lin.bias.fill_(60.0)                   # sigmoid == 1.0 exactly in fp32
+            else:
+                mem.forget_raw.fill_(60.0)
+        x, y = torch.randint(0, 64, (2, 32)), torch.randint(0, 64, (2, 32))
+        loss = model(x * 1, y)[1]
+        loss.backward()
+        assert torch.isfinite(loss)
+        for n, p in model.named_parameters():
+            assert p.grad is None or torch.isfinite(p.grad).all(), (variant, n)
+    print("ok  saturated gates (sigmoid = 1.0): loss and every gradient stay finite")
 
 
 def test_registry():
@@ -125,6 +167,7 @@ def test_gradients():
         model(x, y)[1].backward()
         names = ["W_K", "W_Q", "W_V", "W_O", "conv_k", "conv_q", "theta_raw", "eta_raw"]
         names += ["f", "u", "w_r"] if variant == "C" else ["forget_raw"]
+        names += ["v_taps"]
         for n in names:
             p = getattr(model.memory, n)
             g = (p.weight if hasattr(p, "weight") else p).grad
@@ -155,6 +198,8 @@ def test_detach_chunks():
 if __name__ == "__main__":
     test_delta_step_matches_sequential()
     test_shift_values()
+    test_future_values_keep_order()
+    test_saturated_gates_stay_finite()
     test_registry()
     test_causal()
     test_step0_equals_A()

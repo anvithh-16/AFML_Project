@@ -25,7 +25,7 @@ start exactly equal to A).
 | Part | v2 | Source / reason |
 |---|---|---|
 | Keys and queries | Linear projection, then a 4-token causal depthwise conv (identity at init), unit norm per head. The last 3 tokens of the previous chunk are carried in the state | Short convs as in Titans and other linear-memory models: a key stands for a phrase ("locker 12") |
-| Values | Key t is stored with the mean value of tokens t+1..t+4 (`value_shift`) | Fixes the v1 binding failure; Memory Mosaics also pairs keys with future tokens |
+| Values | Key t is stored with tokens t+1..t+4 (`value_shift`), combined with a learned weight per offset and channel (`value_taps`, init = plain mean), unit RMS | Fixes the v1 binding failure; Memory Mosaics also pairs keys with future tokens. The taps keep order ("48213" vs "84213"), which a plain mean loses |
 | Write rule | Exact per-token delta rule `M <- M + beta_t k_t^T (v_t - k_t M)`, computed in parallel per 64-token step (UT transform, as in DeltaNet). Stable for beta in [0,1] | v1 averaged 256 tokens into one update (~4x over capacity) |
 | Write strength | `beta_t = theta_h * w_t`, theta learned per head (init 0.5) | A kept token is written at full strength; v1 divided by the chunk length |
 | Forgetting | Retention per step = prod_t (1 - f_t), init 2% per 256 tokens | Titans: removing forgetting hurt most |
@@ -72,6 +72,19 @@ learns the format; "far" questions can only be answered from memory.
 
 Gate passed: v2 recalls facts from beyond the receptive field at ~3x chance and ~3x A,
 v1 does not. Absolute recall is still low at this tiny size and budget; one seed only.
+
+**Kaggle GPU, 10,000 steps, d_model 128, window 32, T 512 (Nov 12):** A far 0.035-0.110
+(noise around chance), B v2 far 0.16 -> 0.23, levelling off near 0.20 after ~6k steps,
+1.5x A's step time. C v2 diverged to NaN before step 1,000.
+
+**Fixes after that run:**
+- C's NaN: the forget gate used `log(1 - sigmoid(x))`. Once the gate saturates (sigmoid = 1.0
+  in fp32) that is log 0 with an infinite gradient, and one step turns every weight NaN
+  (reproduced in `test_saturated_gates_stay_finite`). Now `-softplus(x)`: the same value,
+  always finite. The read-gate confidence uses a norm with a finite gradient at 0.
+- B's plateau near 20%: a plain mean of the next 4 tokens is order-blind, so "v1 v2" and
+  "v2 v1" were stored the same. Now learned per-offset taps (`value_taps`, init = mean).
+- The bench now stops a variant at its first non-finite loss or gradient and says where.
 
 ## 5. Training protocol (identical for A, B, C except the memory)
 

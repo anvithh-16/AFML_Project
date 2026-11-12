@@ -116,6 +116,11 @@ def run(variant, a, device):
         _, loss = model(x, y)
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        bad = [n for n, p in model.named_parameters() if p.grad is not None and not torch.isfinite(p.grad).all()]
+        if not torch.isfinite(loss) or bad:
+            print(f"[{variant}] STOPPED at step {step}: non-finite loss/gradients in {bad[:4]}", flush=True)
+            log.append(dict(step=step, loss=float("nan"), near=float("nan"), far=float("nan")))
+            break
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         opt.step()
         if step % a.eval_every == 0 or step == a.steps:
