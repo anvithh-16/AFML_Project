@@ -58,6 +58,10 @@ def parse_args():
     ap.add_argument("--n_samples", type=int, default=8)
     ap.add_argument("--max_new_tokens", type=int, default=128)
     ap.add_argument("--seed", type=int, default=1337)
+    ap.add_argument("--memory_lr_mult", type=float, default=1.0,
+                    help="memory weights train at lr x this (B/C only; A has none). 1 = same as the rest")
+    ap.add_argument("--stage", default="instruct",
+                    help="name in the checkpoint file and 'stage' field, e.g. babi for the BABILong fine-tune")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return ap.parse_args()
 
@@ -152,11 +156,16 @@ def main():
 
     steps_per_epoch = math.ceil(len(train["ids"]) / (args.batch_size * args.grad_accum))
     max_steps = int(steps_per_epoch * args.epochs)
-    decay = [p for p in model.parameters() if p.dim() >= 2]
-    no_decay = [p for p in model.parameters() if p.dim() < 2]
-    opt = torch.optim.AdamW([{"params": decay, "weight_decay": args.weight_decay},
-                             {"params": no_decay, "weight_decay": 0.0}],
-                            lr=args.lr, betas=(0.9, 0.95), fused=use_amp)
+    groups = []
+    for is_mem in (False, True):                     # memory weights may get their own lr multiplier
+        ps = [(n, p) for n, p in model.named_parameters() if n.startswith("memory.") == is_mem]
+        mult = args.memory_lr_mult if is_mem else 1.0
+        for dim_ok, wd in ((lambda d: d >= 2, args.weight_decay), (lambda d: d < 2, 0.0)):
+            sel = [p for _, p in ps if dim_ok(p.dim())]
+            if sel:
+                groups.append({"params": sel, "weight_decay": wd, "lr_mult": mult})
+    opt = torch.optim.AdamW(groups, lr=args.lr, betas=(0.9, 0.95), fused=use_amp)
+    has_mem = not model.memory.is_null
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     def lr_at(step):
@@ -166,7 +175,8 @@ def main():
         return args.min_lr + 0.5 * (args.lr - args.min_lr) * (1 + math.cos(math.pi * prog))
 
     print(f"variant {variant} | init {os.path.basename(args.init)} | train {len(train['ids']):,} / "
-          f"val {len(val['ids']):,} examples | {steps_per_epoch} steps/epoch x {args.epochs} = {max_steps} steps")
+          f"val {len(val['ids']):,} examples | {steps_per_epoch} steps/epoch x {args.epochs} = {max_steps} steps"
+          + (f" | memory lr x{args.memory_lr_mult:g}" if has_mem and args.memory_lr_mult != 1 else ""))
 
     sample_raws = val["raw"][:args.n_samples]
     before = sample_answers(model, tok, sample_raws, device, args.max_new_tokens) if tok else None
@@ -174,7 +184,7 @@ def main():
     print(f"val loss before tuning: {best_val:.4f}")
     log_rows = [{"step": 0, "epoch": 0, "train_loss": "", "val_loss": round(best_val, 4), "lr": "", "elapsed_min": 0}]
     best_val = float("inf")   # keep the best AFTER tuning starts
-    final = os.path.join(args.out_dir, f"variant-{variant}_instruct_{datetime.date.today():%Y%m%d}.pt")
+    final = os.path.join(args.out_dir, f"variant-{variant}_{args.stage}_{datetime.date.today():%Y%m%d}.pt")
 
     # ---- train ---------------------------------------------------------------
     step, t0, running = 0, time.time(), []
@@ -184,7 +194,7 @@ def main():
     while step < max_steps:
         lr = lr_at(step)
         for g in opt.param_groups:
-            g["lr"] = lr
+            g["lr"] = lr * g.get("lr_mult", 1.0)
         opt.zero_grad(set_to_none=True)
         acc = 0.0
         for _ in range(args.grad_accum):
@@ -212,18 +222,24 @@ def main():
                    "train_loss": round(float(np.mean(running)), 4), "val_loss": "",
                    "lr": f"{lr:.2e}", "elapsed_min": round((time.time() - t0) / 60, 1)}
             running = []
+            if has_mem:                                   # the memory signals to watch
+                row.update({f"mem_{k}": round(v, 4) for k, v in model.memory.stats().items()})
             if do_eval:
                 row["val_loss"] = round(evaluate(model, val, args.batch_size * 2, device, amp_ctx), 4)
                 if row["val_loss"] < best_val:
                     best_val = row["val_loss"]
                     save_atomic({"model": model.state_dict(), "model_config": ck["model_config"],
-                                 "variant": variant, "stage": "instruct", "step": step, "val_loss": best_val,
+                                 "variant": variant, "stage": args.stage, "step": step, "val_loss": best_val,
                                  "tokenizer_sha": meta["tokenizer_sha"], "init": os.path.basename(args.init),
                                  "args": vars(args)}, final)
             log_rows.append(row)
             print(f"step {step:>4}/{max_steps} | ep {row['epoch']:.2f} | loss {row['train_loss']:.4f}"
                   + (f" | val {row['val_loss']:.4f}" + (" *best" if row["val_loss"] == best_val else "")
-                     if do_eval else "") + f" | lr {lr:.1e}", flush=True)
+                     if do_eval else "") + f" | lr {lr:.1e}"
+                  + (f" | mem theta {row['mem_theta']:.3f} read {row['mem_read_norm']:.2f} M {row['mem_M_fro']:.1f}"
+                     f" forget {row['mem_forget_per_256']:.3f}"
+                     + (f" wgate {row['mem_write_rate']:.2f} rgate {row['mem_read_gate']:.2f}" if variant == "C" else "")
+                     if has_mem and "mem_theta" in row else ""), flush=True)
 
     with open(os.path.join(args.out_dir, "log.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(log_rows[-1].keys()))

@@ -105,6 +105,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--dolly_dir", required=True, help="output of data/prepare_instruct.py (train.pt, val.pt)")
+    ap.add_argument("--no_dolly", action="store_true",
+                    help="BABILong only (the focused fine-tune); Dolly is still read for its tokenizer check")
     ap.add_argument("--out_dir", default="artifacts/instruct_babilong")
     ap.add_argument("--local_dir", default=None, help="offline: <dir>/<repo name>/<length>/<task>.jsonl")
     ap.add_argument("--tasks", nargs="+", default=["qa1", "qa2", "qa3"])
@@ -163,6 +165,8 @@ def main():
     n_bl = {s: len(out[s]["ids"]) for s in out}
     for split in ("train", "val"):
         d = torch.load(os.path.join(args.dolly_dir, f"{split}.pt"))
+        if args.no_dolly:
+            d = {"ids": [], "prompt_len": [], "raw": []}
         merged = {k: list(d[k]) + out[split][k] for k in ("ids", "prompt_len", "raw")}
         if split == "train":                                  # one fixed shuffle
             perm = rng.permutation(len(merged["ids"]))
@@ -202,6 +206,11 @@ def main():
             print(f"test {task}/{length}: {kept} (removed {dup} seen in train)")
         test["choices"][task] = sorted(answers)
     torch.save(test, os.path.join(args.out_dir, "test.pt"))
+    import hashlib as _h
+    for split in ("train", "val", "test"):          # identical runs on different accounts print identical hashes
+        d = torch.load(os.path.join(args.out_dir, f"{split}.pt"))
+        meta[f"{split}_hash"] = _h.sha1(json.dumps(d["ids"]).encode()).hexdigest()[:12]
+    print("data hashes: " + " | ".join(f"{s} {meta[s + '_hash']}" for s in ("train", "val", "test")))
     meta["test_choices"] = test["choices"]
     json.dump(meta, open(os.path.join(args.out_dir, "meta.json"), "w"), indent=1)
 

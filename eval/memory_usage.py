@@ -83,10 +83,10 @@ def babilong_scores(model, test, cand, idx, device):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--long_dir", required=True)
+    ap.add_argument("--long_dir", default=None, help="needed only with --pretrained")
     ap.add_argument("--babilong_dir", required=True)
     ap.add_argument("--tokenizer", required=True)
-    ap.add_argument("--pretrained", nargs="+", required=True, help="NAME=path (B, C)")
+    ap.add_argument("--pretrained", nargs="*", default=[], help="NAME=path (B, C); empty = skip the PG-19 part")
     ap.add_argument("--instruct", nargs="+", required=True, help="NAME=path (B, C)")
     ap.add_argument("--books", type=int, default=30)
     ap.add_argument("--book_tokens", type=int, default=16384)
@@ -99,8 +99,9 @@ def main():
     res = {"pretrained": {}, "instruct": {}}
 
     # ---- 1 + 2: size and PG-19 far-back-word loss, pretrained -------------------
-    books = load_books(a.long_dir, a.books, a.book_tokens)
-    print(f"PG-19: {len(books)} test books x <= {a.book_tokens} tokens\n")
+    books = load_books(a.long_dir, a.books, a.book_tokens) if a.pretrained else []
+    if a.pretrained:
+        print(f"PG-19: {len(books)} test books x <= {a.book_tokens} tokens\n")
     for spec in a.pretrained:
         name, path = spec.split("=", 1)
         model = load(path, a.device)
